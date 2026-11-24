@@ -16,3 +16,44 @@ detection-engine/models/*
 # Local simulation and runtime data
 detection-engine/demo_folder/*
 !detection-engine/demo_folder/.gitkeep
+
+# =========================
+# Virtual Environments
+# =========================
+.venv/
+.venv*/
+venv/
+env/
+ENV/
+
+# =========================
+# IDE and Operating System
+# =========================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+# Databases and Runtime Logs
+# =========================
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# =========================
+# Local Test Files
+# =========================
+*.tmp
+*.bin
+*.locked
+
+# =========================
+# Frontend
+# =========================
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/

@@ -11,16 +11,33 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 
-# ==========================================
+# ============================================================
 # CONFIGURATION
-# ==========================================
+# ============================================================
 
-MODEL_PATH = "ransomware_model.pkl"
-DATASET_PATH = "dataset.csv"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+MODEL_PATH = os.path.join(
+    BASE_DIR,
+    "ransomware_production_model.pkl"
+)
+
+DATASET_PATH = os.path.join(
+    BASE_DIR,
+    "dataset.csv"
+)
+
+MONITOR_PATH = os.path.join(
+    BASE_DIR,
+    "demo_folder"
+)
+
+API_URL = "http://127.0.0.1:8000/detection/update"
 
 TIME_WINDOW = 15
 
-API_URL = "http://127.0.0.1:8000/detection/update"
+# Security-oriented threshold obtained from threshold analysis
+SECURITY_THRESHOLD = 0.60
 
 SUSPICIOUS_EXTENSIONS = [
     ".locked",
@@ -31,26 +48,55 @@ SUSPICIOUS_EXTENSIONS = [
 ]
 
 
-# ==========================================
-# LOAD AI MODEL
-# ==========================================
+# ============================================================
+# STARTUP
+# ============================================================
+
+print("=" * 55)
+print("AI RANSOMWARE DETECTION ENGINE")
+print("=" * 55)
+print()
+print("Loading production model...")
+
+
+# ============================================================
+# LOAD PRODUCTION MODEL
+# ============================================================
 
 try:
     model = joblib.load(MODEL_PATH)
 
-    print("AI model loaded successfully.")
+    print("✓ Production model loaded")
+    print("  Model:", MODEL_PATH)
 
 except FileNotFoundError:
+    print("✗ Production model not found:")
+    print(MODEL_PATH)
+    print()
+    print("Run train_production_model.py first.")
+    raise SystemExit(1)
 
-    print(f"ERROR: Model file '{MODEL_PATH}' not found.")
-    print("Run: python train_model.py")
+except Exception as error:
+    print("✗ Failed to load production model:")
+    print(error)
+    raise SystemExit(1)
 
-    raise SystemExit
+
+# ============================================================
+# VERIFY MODEL
+# ============================================================
+
+print()
+print("Model classes:", model.classes_)
+
+if not hasattr(model, "predict_proba"):
+    print("✗ ERROR: Model does not support probability prediction.")
+    raise SystemExit(1)
 
 
-# ==========================================
+# ============================================================
 # ENTROPY CALCULATION
-# ==========================================
+# ============================================================
 
 def calculate_entropy(file_path):
 
@@ -63,16 +109,21 @@ def calculate_entropy(file_path):
             return 0.0
 
         byte_counts = np.bincount(
-            np.frombuffer(data, dtype=np.uint8),
+            np.frombuffer(
+                data,
+                dtype=np.uint8
+            ),
             minlength=256
         )
 
         probabilities = (
-            byte_counts[byte_counts > 0] / len(data)
+            byte_counts[byte_counts > 0]
+            / len(data)
         )
 
         entropy = -np.sum(
-            probabilities * np.log2(probabilities)
+            probabilities
+            * np.log2(probabilities)
         )
 
         return round(float(entropy), 4)
@@ -84,21 +135,17 @@ def calculate_entropy(file_path):
         return 0.0
 
 
-# ==========================================
-# CPU USAGE
-# ==========================================
+# ============================================================
+# SYSTEM METRICS
+# ============================================================
 
 def get_cpu_usage():
 
     return round(
-        psutil.cpu_percent(interval=None),
+        psutil.cpu_percent(interval=0.1),
         2
     )
 
-
-# ==========================================
-# MEMORY USAGE
-# ==========================================
 
 def get_memory_usage():
 
@@ -108,9 +155,9 @@ def get_memory_usage():
     )
 
 
-# ==========================================
+# ============================================================
 # DATASET INITIALIZATION
-# ==========================================
+# ============================================================
 
 def initialize_dataset():
 
@@ -119,7 +166,8 @@ def initialize_dataset():
         with open(
             DATASET_PATH,
             "w",
-            newline=""
+            newline="",
+            encoding="utf-8"
         ) as file:
 
             writer = csv.writer(file)
@@ -137,12 +185,13 @@ def initialize_dataset():
                 "Label"
             ])
 
-        print("Dataset created successfully.")
+        print("✓ Dataset created:")
+        print(DATASET_PATH)
 
 
-# ==========================================
+# ============================================================
 # SAVE MONITORING DATA
-# ==========================================
+# ============================================================
 
 def save_data(features, label):
 
@@ -151,7 +200,8 @@ def save_data(features, label):
         with open(
             DATASET_PATH,
             "a",
-            newline=""
+            newline="",
+            encoding="utf-8"
         ) as file:
 
             writer = csv.writer(file)
@@ -169,16 +219,16 @@ def save_data(features, label):
                 label
             ])
 
-        print("Dataset row saved.")
+        print("✓ Dataset row saved")
 
     except Exception as error:
 
-        print("Dataset save error:", error)
+        print("✗ Dataset save error:", error)
 
 
-# ==========================================
+# ============================================================
 # AI PREDICTION
-# ==========================================
+# ============================================================
 
 def predict_activity(features):
 
@@ -203,39 +253,82 @@ def predict_activity(features):
         columns=feature_order
     )
 
-    prediction = model.predict(input_data)[0]
+    # Model prediction
+    raw_prediction = model.predict(input_data)[0]
 
+    # Probability prediction
     probabilities = model.predict_proba(input_data)[0]
 
-    probability_results = {}
+    normal_probability = 0.0
+    ransomware_probability = 0.0
+
+    # Production model:
+    # class 0 = Normal
+    # class 1 = Ransomware
 
     for class_name, probability in zip(
         model.classes_,
         probabilities
     ):
 
-        probability_results[class_name] = round(
-            float(probability),
-            4
-        )
+        if int(class_name) == 0:
 
-    return prediction, probability_results
+            normal_probability = float(probability)
+
+        elif int(class_name) == 1:
+
+            ransomware_probability = float(probability)
+
+    # IMPORTANT:
+    # Detection decision is based on the ransomware
+    # probability and security threshold.
+
+    if ransomware_probability >= SECURITY_THRESHOLD:
+
+        prediction = "Ransomware"
+
+    else:
+
+        prediction = "Normal"
+
+    return (
+        prediction,
+        normal_probability,
+        ransomware_probability
+    )
 
 
-# ==========================================
-# SEND DETECTION TO FASTAPI
-# ==========================================
+# ============================================================
+# SEND DETECTION TO API
+# ============================================================
 
 def send_detection_to_api(
     prediction,
-    probabilities,
-    suspicious_file=None
+    normal_probability,
+    ransomware_probability,
+    file_path
 ):
+
+    alert = (
+        ransomware_probability
+        >= SECURITY_THRESHOLD
+    )
 
     payload = {
         "prediction": prediction,
-        "probabilities": probabilities,
-        "suspicious_file": suspicious_file
+        "normal_probability": round(
+            normal_probability,
+            4
+        ),
+        "ransomware_probability": round(
+            ransomware_probability,
+            4
+        ),
+        "alert": alert,
+        "file": file_path,
+        "timestamp": time.strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        )
     }
 
     try:
@@ -243,19 +336,17 @@ def send_detection_to_api(
         response = requests.post(
             API_URL,
             json=payload,
-            timeout=5
+            timeout=3
         )
 
-        if response.status_code == 200:
+        if response.status_code in [200, 201]:
 
-            print(
-                "Detection sent to API successfully."
-            )
+            print("✓ Detection sent to API successfully.")
 
         else:
 
             print(
-                "API update failed:",
+                "⚠ API returned:",
                 response.status_code
             )
 
@@ -264,17 +355,35 @@ def send_detection_to_api(
                 response.text
             )
 
-    except requests.RequestException as error:
+    except requests.exceptions.ConnectionError:
 
         print(
-            "Could not connect to detection API:",
+            "⚠ API connection failed."
+        )
+
+        print(
+            "Make sure FastAPI is running:"
+        )
+
+        print(
+            "python -m uvicorn main:app --reload"
+        )
+
+    except requests.exceptions.Timeout:
+
+        print("⚠ API request timed out.")
+
+    except Exception as error:
+
+        print(
+            "⚠ API error:",
             error
         )
 
 
-# ==========================================
+# ============================================================
 # FILE MONITOR HANDLER
-# ==========================================
+# ============================================================
 
 class MonitorHandler(FileSystemEventHandler):
 
@@ -289,36 +398,36 @@ class MonitorHandler(FileSystemEventHandler):
         self.start_time = time.time()
 
 
-    # ======================================
-    # IGNORE SYSTEM FILES
-    # ======================================
+    # --------------------------------------------------------
+    # IGNORE FILES
+    # --------------------------------------------------------
 
     def ignore_file(self, path):
 
         ignored_files = [
             "desktop.ini",
-            "thumbs.db"
+            "thumbs.db",
+            ".ds_store"
         ]
 
-        return any(
-            path.lower().endswith(
-                file.lower()
-            )
-            for file in ignored_files
-        )
+        filename = os.path.basename(
+            path
+        ).lower()
+
+        return filename in ignored_files
 
 
-    # ======================================
-    # RESET MONITORING WINDOW
-    # ======================================
+    # --------------------------------------------------------
+    # RESET TIME WINDOW
+    # --------------------------------------------------------
 
     def reset_window_if_needed(self):
 
         current_time = time.time()
 
         elapsed_time = (
-            current_time -
-            self.start_time
+            current_time
+            - self.start_time
         )
 
         if elapsed_time > TIME_WINDOW:
@@ -329,14 +438,16 @@ class MonitorHandler(FileSystemEventHandler):
 
             self.start_time = current_time
 
+            print()
             print(
-                "\nMonitoring window reset.\n"
+                "⟳ Monitoring window reset."
             )
+            print()
 
 
-    # ======================================
-    # CHECK SUSPICIOUS EXTENSION
-    # ======================================
+    # --------------------------------------------------------
+    # SUSPICIOUS EXTENSION
+    # --------------------------------------------------------
 
     def is_suspicious_extension(
         self,
@@ -347,27 +458,32 @@ class MonitorHandler(FileSystemEventHandler):
 
         return int(
             any(
-                file_path.endswith(extension)
-                for extension in SUSPICIOUS_EXTENSIONS
+                file_path.endswith(
+                    extension
+                )
+                for extension
+                in SUSPICIOUS_EXTENSIONS
             )
         )
 
 
-    # ======================================
+    # --------------------------------------------------------
     # PROCESS FILE ACTIVITY
-    # ======================================
+    # --------------------------------------------------------
 
-    def process_activity(self, file_path):
+    def process_activity(
+        self,
+        file_path
+    ):
 
         self.reset_window_if_needed()
 
-        # Wait briefly for the file operation
-        # to finish.
+        # Give the filesystem operation a moment
         time.sleep(0.1)
 
-        # ----------------------------------
-        # Calculate features
-        # ----------------------------------
+        # ----------------------------------------------------
+        # File information
+        # ----------------------------------------------------
 
         entropy = calculate_entropy(
             file_path
@@ -393,10 +509,9 @@ class MonitorHandler(FileSystemEventHandler):
             )
         )
 
-
-        # ----------------------------------
-        # Feature dictionary
-        # ----------------------------------
+        # ----------------------------------------------------
+        # Feature vector
+        # ----------------------------------------------------
 
         features = {
 
@@ -424,27 +539,14 @@ class MonitorHandler(FileSystemEventHandler):
                 TIME_WINDOW
         }
 
-
-        # ----------------------------------
+        # ----------------------------------------------------
         # Display features
-        # ----------------------------------
+        # ----------------------------------------------------
 
-        print(
-            "\n-------------------------------"
-        )
-
-        print(
-            "FEATURES DETECTED"
-        )
-
-        print(
-            "-------------------------------"
-        )
-
-        print(
-            "File:",
-            file_path
-        )
+        print()
+        print("-" * 55)
+        print("FEATURES DETECTED")
+        print("-" * 55)
 
         for key, value in features.items():
 
@@ -452,23 +554,21 @@ class MonitorHandler(FileSystemEventHandler):
                 f"{key}: {value}"
             )
 
-
-        # ----------------------------------
+        # ----------------------------------------------------
         # AI prediction
-        # ----------------------------------
+        # ----------------------------------------------------
 
-        prediction, probabilities = (
-            predict_activity(features)
+        (
+            prediction,
+            normal_probability,
+            ransomware_probability
+        ) = predict_activity(
+            features
         )
 
-
-        print(
-            "\nAI PREDICTION"
-        )
-
-        print(
-            "-------------------------------"
-        )
+        print()
+        print("AI PREDICTION")
+        print("-" * 55)
 
         print(
             "Prediction:",
@@ -476,40 +576,55 @@ class MonitorHandler(FileSystemEventHandler):
         )
 
         print(
-            "Probabilities:",
-            probabilities
+            "Normal probability:",
+            round(
+                normal_probability,
+                4
+            )
         )
 
+        print(
+            "Ransomware probability:",
+            round(
+                ransomware_probability,
+                4
+            )
+        )
 
-        # ----------------------------------
-        # Save dataset
-        # ----------------------------------
+        print(
+            "Security threshold:",
+            SECURITY_THRESHOLD
+        )
+
+        # ----------------------------------------------------
+        # Save monitoring data
+        # ----------------------------------------------------
 
         save_data(
             features,
             prediction
         )
 
-
-        # ----------------------------------
-        # Update FastAPI
-        # ----------------------------------
+        # ----------------------------------------------------
+        # Send result to API
+        # ----------------------------------------------------
 
         send_detection_to_api(
             prediction,
-            probabilities,
+            normal_probability,
+            ransomware_probability,
             file_path
         )
 
+        # ----------------------------------------------------
+        # Security alert
+        # ----------------------------------------------------
 
-        # ----------------------------------
-        # Alert
-        # ----------------------------------
+        if ransomware_probability >= SECURITY_THRESHOLD:
 
-        if prediction == "Ransomware":
-
+            print()
             print(
-                "\n🚨 RANSOMWARE ALERT!"
+                "🚨 RANSOMWARE ALERT!"
             )
 
             print(
@@ -521,38 +636,75 @@ class MonitorHandler(FileSystemEventHandler):
             )
 
             print(
-                "-------------------------------\n"
+                "Ransomware probability:",
+                f"{ransomware_probability:.2%}"
             )
+
+            print(
+                "Threshold:",
+                f"{SECURITY_THRESHOLD:.0%}"
+            )
+
+            print("-" * 55)
 
         else:
 
+            print()
             print(
-                "\n✅ Activity appears normal."
+                "✅ Activity appears normal."
             )
 
-            print(
-                "-------------------------------\n"
-            )
+            print("-" * 55)
 
 
-    # ======================================
-    # FILE MODIFIED
-    # ======================================
+    # ========================================================
+    # FILE CREATED
+    # ========================================================
 
-    def on_modified(self, event):
+    def on_created(self, event):
 
         if event.is_directory:
+
             return
 
         if self.ignore_file(
             event.src_path
         ):
+
+            return
+
+        print()
+        print(
+            "Created:",
+            event.src_path
+        )
+
+        self.process_activity(
+            event.src_path
+        )
+
+
+    # ========================================================
+    # FILE MODIFIED
+    # ========================================================
+
+    def on_modified(self, event):
+
+        if event.is_directory:
+
+            return
+
+        if self.ignore_file(
+            event.src_path
+        ):
+
             return
 
         self.reset_window_if_needed()
 
         self.modification_count += 1
 
+        print()
         print(
             "Modified:",
             event.src_path
@@ -563,155 +715,175 @@ class MonitorHandler(FileSystemEventHandler):
         )
 
 
-    # ======================================
+    # ========================================================
     # FILE RENAMED / MOVED
-    # ======================================
+    # ========================================================
 
     def on_moved(self, event):
 
         if event.is_directory:
+
             return
 
         if self.ignore_file(
-            event.src_path
+            event.dest_path
         ):
+
             return
 
         self.reset_window_if_needed()
 
         self.rename_count += 1
 
+        print()
         print(
-            "Renamed:",
+            "Renamed:"
+        )
+
+        print(
             event.src_path,
             "->",
             event.dest_path
         )
 
-        # Use destination because this is
+        # Use destination because it represents
         # the file after the rename.
+
         self.process_activity(
             event.dest_path
         )
 
 
-    # ======================================
-    # FILE CREATED
-    # ======================================
+    # ========================================================
+    # FILE DELETED
+    # ========================================================
 
-    def on_created(self, event):
+    def on_deleted(self, event):
 
         if event.is_directory:
+
             return
 
         if self.ignore_file(
             event.src_path
         ):
+
             return
 
+        print()
         print(
-            "Created:",
-            event.src_path
-        )
-
-        # Don't immediately classify a newly
-        # created file if it hasn't finished
-        # writing yet.
-        time.sleep(0.1)
-
-        self.process_activity(
+            "Deleted:",
             event.src_path
         )
 
 
-# ==========================================
-# MAIN PROGRAM
-# ==========================================
+# ============================================================
+# MAIN
+# ============================================================
 
-if __name__ == "__main__":
-
-    # --------------------------------------
-    # Initialize dataset
-    # --------------------------------------
+def main():
 
     initialize_dataset()
 
+    # Create monitoring folder if necessary
 
-    # --------------------------------------
-    # Monitoring folder
-    # --------------------------------------
+    if not os.path.exists(
+        MONITOR_PATH
+    ):
 
-    path = "demo_folder"
-
-
-    # Create folder if missing
-    if not os.path.exists(path):
-
-        os.makedirs(path)
-
-        print(
-            f"Created folder: {path}"
+        os.makedirs(
+            MONITOR_PATH
         )
 
+        print(
+            "Created monitoring folder:"
+        )
 
-    # --------------------------------------
-    # Create event handler
-    # --------------------------------------
+        print(
+            MONITOR_PATH
+        )
+
+    # --------------------------------------------------------
+    # Handler
+    # --------------------------------------------------------
 
     event_handler = MonitorHandler()
 
-
-    # --------------------------------------
-    # Create observer
-    # --------------------------------------
+    # --------------------------------------------------------
+    # Watchdog observer
+    # --------------------------------------------------------
 
     observer = Observer()
 
-
     observer.schedule(
         event_handler,
-        path=path,
+        path=MONITOR_PATH,
         recursive=True
     )
 
+    # --------------------------------------------------------
+    # Startup information
+    # --------------------------------------------------------
 
-    # --------------------------------------
-    # Start monitoring
-    # --------------------------------------
+    print()
+    print("=" * 55)
+    print("AI RANSOMWARE MONITOR STARTED")
+    print("=" * 55)
 
     print(
-        "\n================================="
+        "Monitoring folder:"
     )
 
     print(
-        "AI RANSOMWARE MONITOR STARTED"
+        MONITOR_PATH
+    )
+
+    print()
+
+    print(
+        "Production model:"
     )
 
     print(
-        "Monitoring folder:",
-        os.path.abspath(path)
+        os.path.basename(
+            MODEL_PATH
+        )
+    )
+
+    print()
+
+    print(
+        "Security threshold:"
     )
 
     print(
-        "API:",
+        SECURITY_THRESHOLD
+    )
+
+    print()
+
+    print(
+        "API:"
+    )
+
+    print(
         API_URL
     )
+
+    print()
 
     print(
         "Press CTRL + C to stop."
     )
 
-    print(
-        "=================================\n"
-    )
+    print("=" * 55)
+    print()
 
+    # --------------------------------------------------------
+    # Start observer
+    # --------------------------------------------------------
 
     observer.start()
-
-
-    # --------------------------------------
-    # Keep program running
-    # --------------------------------------
 
     try:
 
@@ -719,23 +891,26 @@ if __name__ == "__main__":
 
             time.sleep(1)
 
-
     except KeyboardInterrupt:
 
+        print()
         print(
-            "\nStopping monitor..."
+            "Stopping monitor..."
         )
 
         observer.stop()
 
-
-    # --------------------------------------
-    # Wait for observer
-    # --------------------------------------
-
     observer.join()
-
 
     print(
         "Monitor stopped."
     )
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+
+    main()
